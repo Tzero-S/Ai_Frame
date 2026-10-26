@@ -1,0 +1,54 @@
+# ===== 依赖 / 构建产物 =====
+node_modules/
+dist/
+build/
+*.user
+
+# ===== 操作系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ===== 本地日志 / 临时 =====
+*.log
+tmp/
+temp/
+
+# ===== 本机 Agent 状态（不入库） =====
+.workbuddy-ai/
+
+# ===== 样本沙箱（密文/明文模型、dump 产物一律不入库） =====
+samples/
+
+# 例外：控制台打包用的图标是源码资产，需要入库
+!console/build/
+!console/build/**
+
+# ===== 凭据 / 本地覆盖 =====
+*.local
+*.env
+.env
+
+# ===== 引擎构建 / 测试产物 =====
+engine/build*/
+engine/tests/unit/.build*/
+engine/tests/unit/*.out
+engine/tests/unit/*.exe
+engine/tests/unit/*.err
+
+# ===== 控制台打包产物（便携目录 + zip，几百 MB，不入库） =====
+console/dist-pkg/
+
+# ===== ORT 运行时 DLL（自检时复制） =====
+engine/tests/unit/*.dll
+
+# ===== 编译中间产物 / 驱动日志（本机噪音，不入库） =====
+*.obj
+*.pdb
+*.ilk
+NVIDIA Corporation/
+
+# ===== 工具编译产物（源码在仓库里，二进制不入库） =====
+tools/**/*.exe
+tools/**/*.dll

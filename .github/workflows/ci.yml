@@ -1,0 +1,58 @@
+name: ci
+
+# 依据开发文档 §10.2：PR → 构建 + 单元测试 + 冒烟；main → 集成/回放/性能（后续接入）。
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: windows / msvc
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (MSVC x64, 无 ORT)
+        # runner 未预置 ONNX Runtime，显式关闭可选依赖；ORT 用例由 CMake 自动跳过。
+        run: cmake -S engine -B build -G "Visual Studio 17 2022" -A x64 -DAIM_WITH_ORT=OFF
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests (CTest)
+        env:
+          # GitHub runner 无交互桌面，DXGI 硬件用例显式跳过
+          AIM_SKIP_HW_TESTS: "1"
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Smoke (engine selfcheck)
+        run: .\build\src\Release\helper.exe --selfcheck
+
+  console:
+    name: console / electron-react
+    runs-on: windows-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        working-directory: console
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        working-directory: console
+        run: npm run typecheck
+
+      - name: Build
+        working-directory: console
+        run: npm run build
+
+      - name: IPC smoke
+        working-directory: console
+        run: npm run smoke

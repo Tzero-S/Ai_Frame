@@ -1,0 +1,11 @@
+{
+  "name": "aimframe-engine",
+  "version": "1.0.0",
+  "description": "AI 自瞄框架引擎（C++20）。依赖清单见 §9.3。",
+  "dependencies": [
+    "spdlog",
+    "gtest",
+    "nlohmann-json"
+  ],
+  "builtin-baseline": "0000000000000000000000000000000000000000"
+}
