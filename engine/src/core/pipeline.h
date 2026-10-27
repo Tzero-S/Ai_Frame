@@ -99,8 +99,12 @@ private:
     float cached_h_ = -1.f;
     Fov cached_fov_{};
     bool size_mismatch_logged_ = false;
-    // Sticky 目标以索引追踪（Detection 无 track_id；生产建议接入跟踪 ID）
+    // Sticky 目标以索引追踪（Detection 无 track_id）。
+    // 纯索引不可靠：NMS 后候选顺序会变，同一索引可能指向完全不同的目标。
+    // 因此额外记住锁定时的框，用 IoU 做"同一目标"的粗校验，低于阈值就解锁。
     size_t locked_index_ = static_cast<size_t>(-1);
+    RectF locked_box_{};
+    bool has_locked_box_ = false;
     uint32_t seq_ = 0;
     LeadPredictor lead_{8}; // §7.2 推进外推
     SmoothingFilter smoothing_; // §5.5.4 轨迹平滑

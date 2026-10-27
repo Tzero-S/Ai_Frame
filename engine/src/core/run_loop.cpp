@@ -82,6 +82,20 @@ void ResolveScreenSize(const Config& cfg, int& w, int& h) {
                      "请在控制台「视场 FOV」里手动覆盖");
 }
 
+// Run() 的清理守卫：正常返回与所有提前 return（采集超时/连续失败）都必须
+// 停泵、断开帧源、停运行时。旧实现只在正常路径做，提前返回时运行时会话残留、
+// stats 不完整，而且 stop_ 不复位导致同一对象第二次 Run() 立刻退出。
+struct RunCleanup {
+    CapturePump& pump;
+    Pipeline& pipe;
+    EngineRuntime& rt;
+    ~RunCleanup() {
+        pump.Stop();                  // join 采集线程，确保没人再用 capture
+        pipe.SetFrameSource(nullptr);
+        rt.Stop();
+    }
+};
+
 // 帧失败上限：有限帧模式下避免采集/推理持续失败时忙等（与 --preview 口径一致）
 int MaxFailures(int frames_limit) {
     return (frames_limit > 0) ? (frames_limit * 10 + 100) : 0;
@@ -485,6 +499,9 @@ void RunLoop::UpdateTrigger(int64_t now_ms, const PipelineResult& r) {
 int RunLoop::Run() {
     if (!capture_ || !backend_ || !actuator_) return 4;
 
+    stop_.store(false); // 允许复用同一对象再次 Run（测试/重启场景）
+    RunCleanup cleanup{pump_, pipeline_, runtime_};
+
     // M9 L2（§5.12.2）：工作线程名中性化，避免 aim_* 这类可识别命名
     if (built_.neutral_thread_names) {
         opsec::ProcessGuard::SetNeutralThreadName("w0");
@@ -574,9 +591,7 @@ int RunLoop::Run() {
         }
     }
 
-    // 先停采集泵并 join，确保没有线程还在用 capture / 双缓冲
-    pump_.Stop();
-    pipeline_.SetFrameSource(nullptr);
+    // 清理交给 RunCleanup（析构时停泵 + 断帧源 + 停运行时）；这里先取统计再让它析构
     const auto ps = pump_.stats();
     if (ps.grabs > 0) {
         AIM_ENGINE(Info, "采集泵：抓帧 " + std::to_string(ps.grabs) + "，入队 " +
@@ -586,7 +601,6 @@ int RunLoop::Run() {
     }
 
     stats_.elapsed_ms = Clock::NowMs() - started;
-    runtime_.Stop();
     return 0;
 }
 

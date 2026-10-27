@@ -6,12 +6,18 @@ on:
     branches: [master, main]
   pull_request:
 
+# 最小权限（P3-8）：默认 token 权限跟随仓库设置，CI 只需要读代码。
+permissions:
+  contents: read
+
 jobs:
   build-test:
     name: windows / msvc
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # 第三方 action 固定到 commit SHA（tag 可被移动，等于把供应链交给上游）。
+      # 注释保留人类可读的版本，升级时同时改 SHA 与注释。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure (MSVC x64, 无 ORT)
         # runner 未预置 ONNX Runtime，显式关闭可选依赖；ORT 用例由 CMake 自动跳过。
@@ -29,15 +35,42 @@ jobs:
       - name: Smoke (engine selfcheck)
         run: .\build\src\Release\helper.exe --selfcheck
 
+  # 动态检测（P3-8）：并发/越界问题（如 EngineRuntime 跨线程、解码越界）
+  # 静态检查抓不到，必须靠 ASan 跑一遍测试。MSVC 的 ASan 在 windows-latest 可用。
+  asan:
+    name: windows / msvc + asan
+    runs-on: windows-latest
+    # 先以"建议"身份上线：本机没有 MSVC + ASan 运行库，无法在本地验证这条链路，
+    # 直接设成阻断项会让 CI 因为环境差异变红。稳定跑通后再把这里改成 false。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Configure (ASan)
+        run: >
+          cmake -S engine -B build-asan -G "Visual Studio 17 2022" -A x64
+          -DAIM_WITH_ORT=OFF
+          -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi"
+          -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
+
+      - name: Build (ASan)
+        run: cmake --build build-asan --config RelWithDebInfo --parallel
+
+      - name: Unit tests under ASan
+        env:
+          AIM_SKIP_HW_TESTS: "1"
+          ASAN_OPTIONS: "detect_leaks=0:abort_on_error=1:halt_on_error=1"
+        run: ctest --test-dir build-asan -C RelWithDebInfo --output-on-failure
+
   console:
     name: console / electron-react
     runs-on: windows-latest
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 

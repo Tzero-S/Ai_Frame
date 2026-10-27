@@ -96,10 +96,17 @@ void SerialActuator::close() {
 
 void SerialActuator::move(const spi::MoveCmd& cmd) {
     if (!handle_) return;
+    // 非有限值（NaN/Inf）直接丢弃：lround 对它们是未定义行为，
+    // 而串口另一端拿到垃圾数值可能把光标甩飞。
+    if (!std::isfinite(cmd.dx_px) || !std::isfinite(cmd.dy_px)) return;
+
     char buf[64];
     const int n = std::snprintf(buf, sizeof(buf), "%d,%d\n",
                                 static_cast<int>(std::lround(cmd.dx_px)),
                                 static_cast<int>(std::lround(cmd.dy_px)));
+    // snprintf 返回负值是编码错误，返回值 >= sizeof(buf) 是截断 —— 两种都不能照发
+    if (n <= 0 || n >= static_cast<int>(sizeof(buf))) return;
+
     DWORD written = 0;
     WriteFile(static_cast<HANDLE>(handle_), buf, static_cast<DWORD>(n), &written, nullptr);
 }

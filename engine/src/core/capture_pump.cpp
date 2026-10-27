@@ -73,9 +73,12 @@ void CapturePump::Loop() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(step));
                 left -= step;
             }
-        } else {
+        } else if (spent <= 0) {
             // 短周期：靠采集源自身阻塞来控速（DXGI 会阻塞到下一帧）。
-            // 若采集源不阻塞（GDI），这里只让出时间片，不会把帧率限死。
+            // 若采集源完全不阻塞（GDI 缓存命中 / 假件），纯 yield 会把这个核跑满；
+            // 这里睡 1ms，把空转压到 ~1000fps 上限，实际帧率仍由 target_fps 决定。
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } else {
             std::this_thread::yield();
         }
     }

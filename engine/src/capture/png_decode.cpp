@@ -5,8 +5,33 @@
 #include <objidl.h>
 
 #include <cstring>
+#include <mutex>
 
 namespace aim::capture {
+
+namespace {
+
+// GDI+ 初始化一次即可，且必须在所有 GDI+ 调用之前完成、在进程结束前不要 Shutdown。
+// 旧实现在**每次解码**时 Startup + Shutdown：投屏路径每帧都要付一次初始化开销，
+// 而且反复切换全局状态在多线程下不安全。
+struct GdiplusOnce {
+    ULONG_PTR token = 0;
+    bool ok = false;
+    GdiplusOnce() {
+        Gdiplus::GdiplusStartupInput input;
+        ok = (Gdiplus::GdiplusStartup(&token, &input, nullptr) == Gdiplus::Ok);
+    }
+    ~GdiplusOnce() {
+        if (ok) Gdiplus::GdiplusShutdown(token);
+    }
+};
+
+bool EnsureGdiplus() {
+    static GdiplusOnce once; // 首次调用时初始化，之后直接复用
+    return once.ok;
+}
+
+} // namespace
 
 bool DecodePngToBgra(const uint8_t* data, size_t len,
                      int out_w, int out_h,
@@ -38,9 +63,7 @@ bool DecodePngToBgra(const uint8_t* data, size_t len,
         return false;
     }
 
-    Gdiplus::GdiplusStartupInput input;
-    ULONG_PTR token = 0;
-    if (Gdiplus::GdiplusStartup(&token, &input, nullptr) != Gdiplus::Ok) {
+    if (!EnsureGdiplus()) {
         stream->Release();
         if (err) *err = "GdiplusStartup failed";
         return false;
@@ -74,7 +97,6 @@ bool DecodePngToBgra(const uint8_t* data, size_t len,
         }
     }
 
-    Gdiplus::GdiplusShutdown(token);
     stream->Release();
     return ok;
 }

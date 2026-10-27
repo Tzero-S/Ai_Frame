@@ -142,6 +142,80 @@ AIM_TEST(json_invalid_rejected) {
     AIM_EXPECT_EQ(err.empty(), false);
 }
 
+// P1-1 回归：嵌套深度必须被拒绝，而不是打爆线程栈。
+// 实测修复前 10000 层（20KB 输入）会以 STATUS_STACK_OVERFLOW 直接终止进程。
+AIM_TEST(json_rejects_deep_nesting) {
+    const int depth = 10000;
+    std::string deep(depth, '[');
+    deep.append(depth, ']');
+
+    json::Value v;
+    std::string err;
+    const bool ok = json::parse(deep, v, err);
+    AIM_EXPECT_FALSE(ok);
+    AIM_EXPECT_TRUE(err.find("nesting too deep") != std::string::npos);
+
+    // 合理深度仍然可用（配置/报文实际不超过 10 层）
+    std::string shallow(100, '[');
+    shallow.append(100, ']');
+    json::Value v2;
+    std::string err2;
+    AIM_EXPECT_TRUE(json::parse(shallow, v2, err2));
+}
+
+// P3-3 回归：非法数字必须在解析期被拒绝，不能被 strtod 静默截断
+AIM_TEST(json_rejects_malformed_numbers) {
+    const char* bad[] = {
+        R"({"a":1-2})",   R"({"a":1e})",    R"({"a":1e+})",  R"({"a":--1})",
+        R"({"a":01})",    R"({"a":1.})",    R"({"a":.5})",   R"({"a":+1})",
+        R"({"a":1e++5})", R"({"a":1.2.3})",
+    };
+    for (const char* text : bad) {
+        json::Value v;
+        std::string err;
+        const bool ok = json::parse(text, v, err);
+        AIM_EXPECT_FALSE(ok);
+    }
+
+    // 合法形式全部通过，且数值正确
+    struct Case { const char* text; double want; };
+    const Case good[] = {
+        {R"({"a":0})", 0.0},      {R"({"a":-0})", 0.0},      {R"({"a":12})", 12.0},
+        {R"({"a":-3.5})", -3.5},  {R"({"a":1e3})", 1000.0},  {R"({"a":1.5E-2})", 0.015},
+        {R"({"a":0.25})", 0.25},
+    };
+    for (const auto& c : good) {
+        json::Value v;
+        std::string err;
+        AIM_EXPECT_TRUE(json::parse(c.text, v, err));
+        AIM_EXPECT_NEAR(v["a"].asNumber(-1.0), c.want, 1e-9);
+    }
+}
+
+// P3-3 回归：UTF-16 代理对必须合并成一个 4 字节 UTF-8 码点（旧实现产出 CESU-8 乱码）
+AIM_TEST(json_surrogate_pair_to_utf8) {
+    json::Value v;
+    std::string err;
+    // U+1F600 = 😀 = F0 9F 98 80
+    AIM_EXPECT_TRUE(json::parse(R"({"s":"\uD83D\uDE00"})", v, err));
+    const std::string got = v["s"].asString();
+    AIM_EXPECT_EQ(got.size(), static_cast<size_t>(4));
+    AIM_EXPECT_EQ(static_cast<int>(static_cast<unsigned char>(got[0])), 0xF0);
+    AIM_EXPECT_EQ(static_cast<int>(static_cast<unsigned char>(got[1])), 0x9F);
+    AIM_EXPECT_EQ(static_cast<int>(static_cast<unsigned char>(got[2])), 0x98);
+    AIM_EXPECT_EQ(static_cast<int>(static_cast<unsigned char>(got[3])), 0x80);
+
+    // 孤立代理 → 替换字符 U+FFFD（EF BF BD），不产生非法 UTF-8
+    AIM_EXPECT_TRUE(json::parse(R"({"s":"\uD83D"})", v, err));
+    const std::string lone = v["s"].asString();
+    AIM_EXPECT_EQ(lone.size(), static_cast<size_t>(3));
+    AIM_EXPECT_EQ(static_cast<int>(static_cast<unsigned char>(lone[0])), 0xEF);
+
+    // BMP 内的中文仍正常：U+4E2D = E4 B8 AD
+    AIM_EXPECT_TRUE(json::parse(R"({"s":"\u4E2D"})", v, err));
+    AIM_EXPECT_EQ(v["s"].asString(), std::string("\xE4\xB8\xAD"));
+}
+
 // ---------------- registry (SPI) ----------------
 struct DummySpi { virtual ~DummySpi() = default; virtual int id() const = 0; };
 struct DumA : DummySpi { int id() const override { return 1; } };

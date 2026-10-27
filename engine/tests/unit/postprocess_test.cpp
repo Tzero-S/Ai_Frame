@@ -168,6 +168,93 @@ AIM_TEST(class_filter_whitelist) {
     AIM_EXPECT_EQ(all.size(), 2u);
 }
 
+// P0-2 回归：类别数大于实际特征数时必须返回空结果 + 报错，而不是越界读。
+// 场景来源：模型输出特征维为动态、metadata 声明了 80 类，运行期实际只输出 6 特征。
+AIM_TEST(yolo_decode_rejects_feat_shortfall) {
+    // 6 个特征（cx,cy,w,h,cls0,cls1）却声明 80 类
+    std::vector<float> data(6 * 4, 0.0f);
+    for (int a = 0; a < 4; ++a) {
+        data[0 * 4 + a] = 100.f; // cx
+        data[1 * 4 + a] = 100.f; // cy
+        data[2 * 4 + a] = 20.f;  // w
+        data[3 * 4 + a] = 40.f;  // h
+        data[4 * 4 + a] = 0.9f;  // cls0
+        data[5 * 4 + a] = 0.1f;  // cls1
+    }
+    TensorView tv;
+    tv.data = data.data();
+    tv.ndim = 3;
+    tv.dims[0] = 1;
+    tv.dims[1] = 6;  // feats
+    tv.dims[2] = 4;  // anchors
+
+    YoloOutputSpec spec;
+    spec.num_classes = 80; // 与 feats 不符
+    spec.num_kpts = 0;
+    spec.imgsz = 640;
+    spec.conf_threshold = 0.3f;
+
+    std::string err;
+    const auto dets = DecodeYolo(tv, spec, &err);
+    AIM_EXPECT_TRUE(dets.empty());
+    AIM_EXPECT_TRUE(!err.empty());
+    AIM_EXPECT_TRUE(err.find("特征维不足") != std::string::npos);
+
+    // 同样的张量、类别数改成 2 → 正常解出
+    YoloOutputSpec ok = spec;
+    ok.num_classes = 2;
+    std::string err2;
+    const auto dets2 = DecodeYolo(tv, ok, &err2);
+    AIM_EXPECT_EQ(dets2.size(), 4u);
+    AIM_EXPECT_TRUE(err2.empty());
+}
+
+// special9 布局（1 关键点）走单独判据：feat_count 必须 >= 8（cx,cy,w,h,obj,kx,ks,ky）
+AIM_TEST(yolo_decode_special9_guard) {
+    // 缓冲与 dims 严格一致（避免测试自己越界）：7 特征 × 3 锚点
+    std::vector<float> short_data(7 * 3, 0.5f);
+    TensorView tv;
+    tv.data = short_data.data();
+    tv.ndim = 3;
+    tv.dims[0] = 1;
+    tv.dims[1] = 7; // 7 < 8 → 必须被拒
+    tv.dims[2] = 3;
+
+    YoloOutputSpec spec;
+    spec.num_classes = 1;
+    spec.num_kpts = 1; // 触发 special9 判定分支
+    spec.imgsz = 640;
+    spec.conf_threshold = 0.3f;
+
+    std::string err;
+    const auto dets = DecodeYolo(tv, spec, &err);
+    AIM_EXPECT_TRUE(dets.empty());
+    AIM_EXPECT_TRUE(err.find("特征维不足") != std::string::npos);
+
+    // 补齐到 8 特征 → 正常解出
+    std::vector<float> ok_data(8 * 3, 0.5f);
+    for (int a = 0; a < 3; ++a) {
+        ok_data[0 * 3 + a] = 300.f; // cx
+        ok_data[1 * 3 + a] = 300.f; // cy
+        ok_data[2 * 3 + a] = 20.f;  // w
+        ok_data[3 * 3 + a] = 40.f;  // h
+        ok_data[4 * 3 + a] = 0.9f;  // obj
+        ok_data[5 * 3 + a] = 300.f; // kx
+        ok_data[6 * 3 + a] = 0.9f;  // ks
+        ok_data[7 * 3 + a] = 300.f; // ky
+    }
+    TensorView tv2;
+    tv2.data = ok_data.data();
+    tv2.ndim = 3;
+    tv2.dims[0] = 1;
+    tv2.dims[1] = 8;
+    tv2.dims[2] = 3;
+    std::string err2;
+    const auto dets2 = DecodeYolo(tv2, spec, &err2);
+    AIM_EXPECT_EQ(dets2.size(), 3u);
+    AIM_EXPECT_TRUE(dets2[0].kpts.size() == 1u);
+}
+
 int main() {
     return aim::test::run_all();
 }

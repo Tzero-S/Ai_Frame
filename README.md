@@ -40,6 +40,8 @@
 | 精度 | ROI 感知坐标反投影、逐帧增量处理、按真实分辨率做几何换算 |
 | 可观测 | 状态快照、分段健康度、逐帧耗时拆解、结构化日志 |
 | 可测试 | 硬件相关段全部经 SPI 解耦，Fake 实现可跑完整链路；硬件用例可跳过 |
+| 并发安全 | 跨线程共享的状态一律加锁；IPC 每连接独立线程，句柄由持有线程关闭 |
+| 输入边界 | JSON 解析限深、配置 50 条校验、模型解码前校验张量形状、外部命令参数白名单 |
 | 可替换 | 采集 / 推理 / 输出 / 覆盖层四类后端均可插拔，注册名与接口稳定 |
 | 可配置 | JSON 配置 + 38 条校验 + 原子落盘 + 版本迁移，控制台可视化下发 |
 
@@ -129,6 +131,14 @@ Electron 32 + React 18 + TypeScript + Ant Design 5。
 - 可选的节奏控制与行为整形（默认关闭）
 - 可选的调试器检测（默认关闭）
 
+**控制面加固**
+
+- 管道 DACL 只授权对象所有者（当前登录用户），其他账户连不上
+- 每个连接独立工作线程（上限 8），不再串行阻塞第二个客户端
+- 请求超过 16 MB 返回明确的 `413` 错误帧，而不是静默断连
+- 发现文件同样收紧 ACL，避免被同机其他账户改写指向
+- 子进程只继承必要的两个句柄（不泄漏调用方的 stdout 管道）
+
 ### 3.2 占位实现（接口已就绪）
 
 `capture_stub` / `backend_stub` / `actuator_stub` / `overlay_stub`：
@@ -149,6 +159,23 @@ Electron 32 + React 18 + TypeScript + Ant Design 5。
 | 模型权重 | **不提供**，需自备 ONNX 模型 |
 | 安装器 / 代码签名 / 自动更新 | 未做，便携 zip 分发 |
 | 运行期显示模式变更监听 | 未做，靠「帧尺寸优先」在下一帧自愈 |
+
+---
+
+### 3.4 最近一轮质量加固
+
+按企业级审查标准逐项排查后修复的缺陷，均已补回归用例：
+
+| 类别 | 修复内容 |
+| --- | --- |
+| 并发 | 运行时状态（帧计数 / 耗时 / 检测列表）跨线程访问统一加锁，消除 IPC 线程与推理线程的竞争 |
+| 越界 | 模型输出解码前校验特征维与类别数匹配，形状不一致直接返回错误而不是越界读 |
+| 外部命令 | 投屏采集不再经 shell 拼接，改为直接启动 `adb.exe` + 参数白名单 + 独立 stdout 管道 |
+| 解析健壮性 | JSON 解析限深 128（20 KB 深嵌套原会栈溢出）、严格数字文法、UTF-16 代理对正确合并 |
+| 生命周期 | 管道关闭改为「取消 I/O → 等工作线程返回 → 由持有者关闭句柄」；退出路径统一走 RAII 清理 |
+| 配置 | 校验规则从 38 条扩到 50 条（目标屏序号 / 输出通道参数 / 容器规模上限 / 按键名长度），配置文件大小上限 4 MB |
+| 语义修正 | `--serve` 现在读取 `--config` 并在 `config.apply` 后落盘；状态快照如实报告「未运行数据面」 |
+| 体验 | 未识别的配置字段会打日志（拼错不再静默）、控制台轮询加在途保护、大响应收包改增量累积 |
 
 ---
 
@@ -224,6 +251,12 @@ helper.exe --run --model model.onnx --config my-config.json
 helper.exe --serve
 ```
 
+补充说明：
+
+- `--serve` 只提供控制面，不跑数据面，因此 `status.snapshot` 会如实返回 `running=false`。
+- `--serve --config x.json` 会加载该文件；之后每次 `config.apply` 成功后自动写回同一路径。
+- `--preview --config x.json` 会采用其中的 `capture.output_monitor`（其余参数预览固定用模型输入尺寸）。
+
 | 参数 | 说明 |
 | --- | --- |
 | `--selfcheck` | 校验默认配置与内置注册项 |
@@ -283,15 +316,27 @@ cd engine && bash tests/run_selfcheck.sh       # 引擎：严格模式自检（�
 cd console && npm run typecheck && npm test && npm run e2e
 ```
 
-当前状态（Windows 11 / MinGW g++ 16.2 / ORT 1.20.1 CPU）：
+当前状态（Windows 11 / MinGW g++ 16.2 / ORT 1.20.1 CPU，2560×1600@125%）：
 
 | 项 | 结果 |
 | --- | --- |
-| `ctest` | 42/42 通过 |
-| `run_selfcheck.sh` | 全 PASS（含二进制自检，exit 0） |
-| 控制台 | typecheck / build / test / e2e 全通过 |
+| `ctest` | **42/42 通过**（约 28 s） |
+| `run_selfcheck.sh` | 全 PASS（43 个 PASS，含二进制自检，exit 0） |
+| 断言总数 | `fov` 235 / `pipeline` 73 / `runtime` 43 / `postprocess` 63 / `hardening` 96 / `spi_ipc` 66 / `core` 94 / `scrcpy` 59 |
+| 控制台 | typecheck / build / test(10) / e2e 全通过 |
 
-CI：`.github/workflows/ci.yml`（windows-latest，MSVC，关闭 ORT，跳过硬件用例）。
+CI 三个任务（`.github/workflows/ci.yml`，均为 windows-latest）：
+
+| 任务 | 内容 |
+| --- | --- |
+| `build-test` | MSVC 构建（关闭 ORT）+ CTest + 二进制自检；`AIM_SKIP_HW_TESTS=1` 跳过硬件用例 |
+| `asan` | 同套用例在 ASan 下再跑一遍，用于抓并发/越界类问题（当前为**建议性**任务，暂不阻断合并） |
+| `console` | 控制台 typecheck / build / IPC 冒烟 |
+
+> 第三方 action 已固定到 commit SHA，并显式声明 `permissions: contents: read`。
+
+> 硬件相关用例（DXGI / GDI / 投屏）依赖真实桌面会话，与并行程序争用采集时可能偶发失败；
+> 需要确定性结果时统一加 `AIM_SKIP_HW_TESTS=1`。
 
 ---
 
@@ -344,6 +389,22 @@ CI：`.github/workflows/ci.yml`（windows-latest，MSVC，关闭 ORT，跳过硬
 **Q10：预览看不到可视化窗口。**
 确认给了 `--model`、没有加 `--no-show`；独占全屏下覆盖层会被遮挡，请用无边框窗口模式。
 
+**Q11：另一个账号 / 另一个进程连不上管道。**
+这是设计如此：管道 DACL 只授权对象所有者（拉起引擎的那个用户），其他账户会被拒绝。
+同机排查请用同一账号，或临时以该账号启动引擎。
+
+**Q12：请求返回 `code=413 request too large`。**
+单个请求上限 16 MB（`ipc/framing.h` 的 `kMaxFrameBytes`）。模型预览请把输入图缩到模型尺寸
+（如 960×960），不要直接传整屏原图。
+
+**Q13：`config.apply` 成功但某项没生效。**
+字段名拼错时会被忽略并打日志：`config.apply: 忽略未知字段 aim.scope.half_widht`。
+按日志里的路径改正即可；字段名以 `helper.exe --dump-default-config` 导出的为准。
+
+**Q14：`--serve` 模式下控制台显示「未运行」。**
+正常现象：`--serve` 只提供控制面、不跑数据面，`status.snapshot` 会如实返回 `running=false`。
+需要真实运行时用 `--run`。
+
 ---
 
 ## 11. 目录结构
@@ -364,7 +425,7 @@ Ai_Frame/
 │  │  ├─ ipc/               管道服务端 / 帧协议 / 命令处理
 │  │  └─ opsec/             隐私与稳健性
 │  ├─ data/patterns.json    曲线形状样例
-│  └─ tests/                42 个测试 + 自检脚本
+│  └─ tests/                42 个测试套件 + run_selfcheck.sh
 ├─ console/                 Electron + React + TS 控制台
 │  ├─ src/main/             窗口 / 托盘 / 进程托管 / 窗口状态
 │  ├─ src/renderer/         10 个页面 + IPC 客户端 + mock

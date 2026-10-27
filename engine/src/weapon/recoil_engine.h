@@ -45,8 +45,14 @@ public:
     // 本帧增量（相对上次调用）。首次调用从 0 起算。
     Vec2F SampleNow();
 
-    // 运行时改强度（用于按开镜倍率切换 strength_ads，无需重建引擎）
-    void SetStrength(float s) { p_.strength = s; }
+    // 运行时改强度（用于按开镜倍率切换 strength_ads，无需重建引擎）。
+    // 必须同步重标定 last_cum_：否则下一帧增量 = 新峰值×shape − 旧累计，
+    // 开镜切档那一帧会甩出一个大尖峰（实测腰射 5 → 开镜 15 时可达数百像素）。
+    void SetStrength(float s) {
+        if (s == p_.strength) return;
+        p_.strength = s;
+        last_cum_ = CumulativeAt(t_); // 以新强度重算当前累计，增量从这一帧重新起算
+    }
     void Advance(float dt_ms) { t_ += dt_ms; }
     void OnShot() { t_ += FireIntervalMs(); }
     void Reset() { t_ = 0.f; last_cum_ = Vec2F{}; have_last_ = false; }

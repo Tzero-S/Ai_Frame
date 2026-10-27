@@ -83,11 +83,27 @@ function renderPage(
   }
 }
 
+// 稳定序列化：对象键按字典序递归输出，数组保持原序。
+// 用途是"内容相同即视为相同"，与 JSON.stringify 的插入顺序敏感行为区分开。
+function stableStringify(v: unknown): string {
+  const norm = (x: unknown): unknown => {
+    if (Array.isArray(x)) return x.map(norm);
+    if (x && typeof x === 'object') {
+      const o = x as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(o).sort()) out[k] = norm(o[k]);
+      return out;
+    }
+    return x;
+  };
+  return JSON.stringify(norm(v));
+}
+
 export default function App() {
   const [page, setPage] = useState<PageKey>('aim');
   const [cfg, setCfg] = useState<AppConfig>(defaultConfig);
   // 已下发给引擎的配置快照（用于"未应用变更"提示）
-  const [applied, setApplied] = useState<string>(() => JSON.stringify(defaultConfig));
+  const [applied, setApplied] = useState<string>(() => stableStringify(defaultConfig));
   const status = useStatus(1000);
   // 连接状态以"能否取到 status.snapshot"为准，而不是"是否跑在 Electron 里"
   const inElectron = isElectron();
@@ -108,7 +124,7 @@ export default function App() {
         if (remote && typeof remote === 'object') {
           setCfg((prev) => {
             const merged = mergeDeep(prev, remote as unknown as DeepPartial<AppConfig>);
-            setApplied(JSON.stringify(merged));
+            setApplied(stableStringify(merged));
             return merged;
           });
         }
@@ -124,14 +140,16 @@ export default function App() {
   const update = (patch: DeepPartial<AppConfig>) =>
     setCfg((prev) => mergeDeep(prev, patch));
 
-  const dirty = useMemo(() => JSON.stringify(cfg) !== applied, [cfg, applied]);
+  // 稳定序列化：JSON.stringify 的键序依赖插入顺序，字段被重建后即使内容相同
+  // 也会被判成"有改动"（顶栏一直亮着"未下发"）。这里按键名递归排序后再比较。
+  const dirty = useMemo(() => stableStringify(cfg) !== applied, [cfg, applied]);
 
   const applyConfig = async () => {
     try {
       const r = await invoke('config.apply', { config: { schema_version: 4, ...cfg } });
       if (r.code !== 0) throw new Error(r.msg);
       const p = r.payload as { applied_version?: number } | undefined;
-      setApplied(JSON.stringify(cfg));
+      setApplied(stableStringify(cfg));
       message.success(`配置已应用 v${p?.applied_version ?? '?'}`);
     } catch (e) {
       message.error(e instanceof Error ? e.message : '应用失败');

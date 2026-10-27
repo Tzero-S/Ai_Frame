@@ -14,6 +14,7 @@ const char* to_string(SegmentState s) {
 }
 
 void EngineRuntime::Start(int64_t now_ms) {
+    std::lock_guard<std::mutex> lk(mtx_);
     running_ = true;
     started_ms_ = now_ms;
     last_snapshot_ms_ = now_ms;
@@ -28,20 +29,26 @@ void EngineRuntime::Start(int64_t now_ms) {
     detections_.clear();
 }
 
-void EngineRuntime::Stop() { running_ = false; }
+void EngineRuntime::Stop() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    running_ = false;
+}
 
 void EngineRuntime::SetDetections(const std::vector<Detection>& dets) {
     const size_t n = std::min<size_t>(dets.size(), 16);
+    std::lock_guard<std::mutex> lk(mtx_);
     detections_.assign(dets.begin(), dets.begin() + static_cast<std::ptrdiff_t>(n));
 }
 
 void EngineRuntime::SetSegments(SegmentState capture, SegmentState inference, SegmentState actuator) {
+    std::lock_guard<std::mutex> lk(mtx_);
     capture_ = capture;
     inference_ = inference;
     actuator_ = actuator;
 }
 
 void EngineRuntime::OnFrame(int64_t now_ms, const PipelineResult& r, const FrameTimings& t) {
+    std::lock_guard<std::mutex> lk(mtx_);
     ++frames_;
 
     if (last_frame_ms_ >= 0) {
@@ -68,6 +75,12 @@ void EngineRuntime::OnFrame(int64_t now_ms, const PipelineResult& r, const Frame
 }
 
 StatusSnapshot EngineRuntime::Snapshot(int64_t now_ms) const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return SnapshotLocked(now_ms);
+}
+
+// 调用方必须已持有 mtx_（SnapshotJson 一次加锁内完成取数与序列化）
+StatusSnapshot EngineRuntime::SnapshotLocked(int64_t now_ms) const {
     StatusSnapshot s;
     s.running = running_;
     s.uptime_ms = running_ ? (now_ms - started_ms_) : 0;
@@ -84,7 +97,8 @@ StatusSnapshot EngineRuntime::Snapshot(int64_t now_ms) const {
 }
 
 std::string EngineRuntime::SnapshotJson(int64_t now_ms) const {
-    const StatusSnapshot s = Snapshot(now_ms);
+    std::lock_guard<std::mutex> lk(mtx_);
+    const StatusSnapshot s = SnapshotLocked(now_ms);
 
     json::Value v;
     v["running"] = s.running;
@@ -124,6 +138,7 @@ std::string EngineRuntime::SnapshotJson(int64_t now_ms) const {
 }
 
 bool EngineRuntime::DueForSnapshot(int64_t now_ms) {
+    std::lock_guard<std::mutex> lk(mtx_);
     if (!running_) return false;
     if (now_ms - last_snapshot_ms_ >= 1000) {
         last_snapshot_ms_ = now_ms;

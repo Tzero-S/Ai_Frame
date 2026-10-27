@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <sddl.h>
 #endif
 
 namespace aim::identity {
@@ -44,11 +45,35 @@ std::string DiscoveryFilePath() {
 std::string WriteDiscovery(const std::string& pipe_name) {
     const std::string path = DiscoveryFilePath();
     if (path.empty() || pipe_name.empty()) return {};
+#ifdef _WIN32
+    // 发现文件把"管道名"暴露给读它的人。%TEMP% 虽然按用户隔离，但同机的其他账户
+    // 若拿到路径仍可能写入伪造值（把控制台引向攻击者的管道），所以这里显式收紧 DACL：
+    // 只允许对象所有者（当前用户）访问。
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    SECURITY_ATTRIBUTES sa{};
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorA(
+            "D:P(A;;GA;;;OW)", SDDL_REVISION_1, &sd, nullptr)) {
+        sa.nLength = sizeof(sa);
+        sa.lpSecurityDescriptor = sd;
+        sa.bInheritHandle = FALSE;
+    }
+    HANDLE h = CreateFileA(path.c_str(), GENERIC_WRITE, 0, sd ? &sa : nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (sd) LocalFree(sd);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    DWORD written = 0;
+    const BOOL ok = WriteFile(h, pipe_name.data(), static_cast<DWORD>(pipe_name.size()),
+                              &written, nullptr);
+    CloseHandle(h);
+    if (!ok || written != static_cast<DWORD>(pipe_name.size())) return {};
+    return path;
+#else
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return {};
     std::fwrite(pipe_name.data(), 1, pipe_name.size(), f);
     std::fclose(f);
     return path;
+#endif
 }
 
 std::string ReadDiscovery() {

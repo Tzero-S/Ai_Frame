@@ -2,6 +2,8 @@
 #include "opsec/redact.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <array>
 #include <ctime>
@@ -91,10 +93,18 @@ void Logger::write(LogChannel ch, LogLevel lvl, std::string_view msg) {
 #endif
     std::strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tm_buf);
 
-    char line[1024];
-    std::snprintf(line, sizeof(line), "[%s] %s %s | %.*s",
-                  ts, to_string(ch), to_string(lvl),
-                  static_cast<int>(msg.size()), msg.data());
+    // 4096 而不是 1024：配置 JSON / 错误上下文经常超过 1KB，静默截断会让排障信息丢失。
+    // 仍可能截断（超长消息），此时显式打上 "…(truncated)" 标记而不是无声丢弃。
+    char line[4096];
+    const int n = std::snprintf(line, sizeof(line), "[%s] %s %s | %.*s",
+                                ts, to_string(ch), to_string(lvl),
+                                static_cast<int>(msg.size()), msg.data());
+    if (n < 0) return;
+    if (static_cast<size_t>(n) >= sizeof(line)) {
+        const char kTail[] = " …(truncated)";
+        const size_t tail = sizeof(kTail) - 1;
+        std::memcpy(line + sizeof(line) - tail - 1, kTail, tail + 1);
+    }
 
     std::lock_guard<std::mutex> lk(mtx_);
 
@@ -109,12 +119,11 @@ void Logger::write(LogChannel ch, LogLevel lvl, std::string_view msg) {
     auto& f = impl_->files[idx];
     if (!dir_.empty()) {
         if (!f.is_open()) {
-            // 简易建目录（仅一层；Windows 下 CreateDirectoryA，POSIX mkdir）
-#ifdef _WIN32
-            CreateDirectoryA(dir_.c_str(), nullptr);
-#else
-            mkdir(dir_.c_str(), 0755);
-#endif
+            // 递归建目录：默认路径是 %LOCALAPPDATA%\AIMFramework\logs，需要两层。
+            // 旧实现用 CreateDirectoryA（只建一层），父目录不存在时静默失败 →
+            // 全新机器上文件日志全部丢失，只剩控制台输出。
+            std::error_code ec;
+            std::filesystem::create_directories(dir_, ec);
             f.open(file_path(ch), std::ios::out | std::ios::app);
         }
         if (f.is_open()) {

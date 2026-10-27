@@ -9,6 +9,10 @@
 // （约 10–20 FPS），再解码为 BGRA。H.264 直解（scrcpy server + 硬解）待解码链接入。
 namespace aim::capture {
 
+// adb 序列号白名单（字母数字 + . _ : -）。公开出来是为了能单测：
+// 这是命令注入防线的第一道闸，必须能脱离 adb 环境被验证。
+bool IsSafeAdbSerial(const std::string& s);
+
 class ScrcpyCapture final : public spi::ICapture {
 public:
     ScrcpyCapture();

@@ -165,6 +165,15 @@ PipelineResult Pipeline::ProcessFrame(int64_t now_ms) {
     }
 
     // 4) 目标选择
+    // Sticky 的身份校验：索引还在范围内不代表还是同一个目标（NMS 后顺序会变）。
+    // 用上一帧锁定框做 IoU 粗匹配，掉到 0.3 以下就认为目标已丢失，解锁重选。
+    if (locked_index_ < dets_.size() && has_locked_box_ &&
+        s_.selection == TargetSelection::Sticky) {
+        if (Iou(dets_[locked_index_].box, locked_box_) < 0.3f) {
+            locked_index_ = static_cast<size_t>(-1);
+            has_locked_box_ = false;
+        }
+    }
     const Detection* locked = (locked_index_ < dets_.size()) ? &dets_[locked_index_] : nullptr;
     // 准星基准点（§5.5.1）：多数游戏是屏幕几何中心，个别游戏需要偏移
     const Vec2F center{ screen_w * 0.5f + s_.aim.crosshair_offset_x,
@@ -173,12 +182,15 @@ PipelineResult Pipeline::ProcessFrame(int64_t now_ms) {
                                         screen_w, screen_h, fov, locked, &center);
     if (!sel) {
         locked_index_ = static_cast<size_t>(-1);
+        has_locked_box_ = false;
         lead_.Reset();
         smoothing_.Reset();
         r.ok = true;
         return r;
     }
     size_t sel_idx = static_cast<size_t>(sel - dets_.data());
+    locked_box_ = sel->box;
+    has_locked_box_ = true;
 
     // M9 目标切换迟滞：新目标需连续 N 帧才切换（§5.12.1）
     if (s_.switch_hysteresis && s_.anti_detect.level != AntiDetectLevel::Off &&

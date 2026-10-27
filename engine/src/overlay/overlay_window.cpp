@@ -117,7 +117,7 @@ bool OverlayWindow::init(int width, int height, bool click_through, std::string*
         if (err) *err = "CreateCompatibleDC failed";
         return false;
     }
-    SelectObject(mem, dib);
+    old_bmp_ = SelectObject(mem, dib); // 记住旧位图，shutdown 时还原
 
     hwnd_ = hwnd;
     dib_ = dib;
@@ -132,17 +132,21 @@ bool OverlayWindow::init(int width, int height, bool click_through, std::string*
 }
 
 void OverlayWindow::shutdown() {
+    // 顺序要求：先把窗口销毁（它会释放与窗口绑定的 DC 引用），再把 DIB 从内存 DC
+    // 里 SelectObject 还原，最后删 DC 与位图。旧实现先删 DC/位图再 DestroyWindow，
+    // 且没有还原旧位图 —— GDI 对象仍被 DC 引用时删除属于未定义顺序。
+    if (hwnd_) {
+        DestroyWindow(static_cast<HWND>(hwnd_));
+        hwnd_ = nullptr;
+    }
     if (mem_dc_) {
+        if (dib_) SelectObject(static_cast<HDC>(mem_dc_), old_bmp_);
         DeleteDC(static_cast<HDC>(mem_dc_));
         mem_dc_ = nullptr;
     }
     if (dib_) {
         DeleteObject(static_cast<HBITMAP>(dib_));
         dib_ = nullptr;
-    }
-    if (hwnd_) {
-        DestroyWindow(static_cast<HWND>(hwnd_));
-        hwnd_ = nullptr;
     }
     pixels_ = nullptr;
     width_ = height_ = 0;

@@ -7,6 +7,8 @@
 
 #include <cctype>
 #include <cstring>
+#include <cwctype>
+#include <string>
 #include <mutex>
 #include <string>
 
@@ -29,13 +31,34 @@ bool ProcessGuard::TitleMatches(const std::string& title, const std::string& pat
     return Lower(title).find(Lower(pattern)) != std::string::npos;
 }
 
+namespace {
+// UTF-8 → UTF-16（窗口标题必须是宽字符：GetWindowTextA 会把中文等非 ANSI 字符
+// 转成 '?'，导致 title_pattern 永远匹配不上，失焦即停直接失效）
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+std::wstring LowerWide(std::wstring s) {
+    for (wchar_t& c : s) c = static_cast<wchar_t>(std::towlower(c));
+    return s;
+}
+} // namespace
+
 bool ProcessGuard::IsGameFocused() const {
     if (title_pattern_.empty()) return true;
     HWND fg = GetForegroundWindow();
     if (!fg) return false;
-    char buf[512]{};
-    GetWindowTextA(fg, buf, sizeof(buf));
-    return TitleMatches(buf, title_pattern_);
+    wchar_t buf[512]{};
+    GetWindowTextW(fg, buf, 512);
+    const std::wstring title(buf);
+    const std::wstring pattern = Utf8ToWide(title_pattern_);
+    if (pattern.empty()) return true;
+    return LowerWide(title).find(LowerWide(pattern)) != std::wstring::npos;
 }
 
 bool ProcessGuard::ShouldPause() const {

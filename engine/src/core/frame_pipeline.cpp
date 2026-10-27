@@ -64,8 +64,10 @@ bool FrameDoubleBuffer::Submit(const uint8_t* bgra, int w, int h,
     s.h = h;
     s.screen_w = ClampNonNeg(screen_w);
     s.screen_h = ClampNonNeg(screen_h);
-    s.src_x = ClampNonNeg(src_x);
-    s.src_y = ClampNonNeg(src_y);
+    // src_x/src_y **不夹取**：多显示器时虚拟桌面原点可以是负数（副屏在主屏左侧/上方），
+    // 夹成 0 会让 ROI 反投影整体平移，检测框落在错误位置。只有宽高需要非负。
+    s.src_x = src_x;
+    s.src_y = src_y;
     s.src_w = ClampNonNeg(src_w);
     s.src_h = ClampNonNeg(src_h);
     s.seq = seq;

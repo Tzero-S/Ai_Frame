@@ -12,7 +12,17 @@ float ClampAbs(float v, float limit) {
 }
 } // namespace
 
-Vec2F SmoothingFilter::Apply(const Vec2F& in, float dt_s) {
+Vec2F SmoothingFilter::Apply(const Vec2F& in_raw, float dt_s) {
+    // 输入净化：一旦把 NaN/Inf 写进 state，之后每一帧都会是 NaN（滤波器有记忆），
+    // 表现为"瞄准突然彻底不动"且只有 Reset 才能恢复。这里在入口就挡掉。
+    Vec2F in = in_raw;
+    if (!std::isfinite(in.x) || !std::isfinite(in.y)) {
+        if (std::isfinite(state.x) && std::isfinite(state.y)) return state; // 保持上一帧
+        in = Vec2F{};
+        state = Vec2F{};
+        vel = Vec2F{};
+        last_acc = Vec2F{};
+    }
     if (!(dt_s > 0.f) || !std::isfinite(dt_s)) dt_s = 1.f / 120.f;
     // 单帧抖动保护：异常大的 dt（掉帧/断点）直接钳到 100ms，避免一步跳死
     dt_s = std::min(dt_s, 0.1f);

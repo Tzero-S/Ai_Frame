@@ -1,6 +1,7 @@
 #include "postprocess/yolo_decoder.h"
 #include <cmath>
 #include <algorithm>
+#include <string>
 
 namespace aim {
 
@@ -52,6 +53,22 @@ std::vector<Detection> DecodeYolo(const TensorView& out, const YoloOutputSpec& s
         if (feat_count == with_obj)      has_obj = true;
         else if (feat_count == no_obj)   has_obj = false;
         else                             has_obj = (feat_count >= with_obj);
+    }
+
+    // 边界校验（必须先于任何 at() 调用）：
+    // 解码按 4 + (has_obj?1:0) + nc + 3*nk 读取特征维。若 spec.num_classes/num_kpts
+    // 与实际输出特征数不一致（动态特征维 + 元数据声明类别数、或元数据与实际不符），
+    // at() 会越过本锚点行读到相邻锚点甚至堆尾 —— 越界读。
+    {
+        const int need = special9 ? 8 : (4 + (has_obj ? 1 : 0) + nc + 3 * nk);
+        if (feat_count < need) {
+            if (err) {
+                *err = "特征维不足：需要 " + std::to_string(need) + "，实际 " +
+                       std::to_string(feat_count) + "（num_classes=" + std::to_string(nc) +
+                       ", num_kpts=" + std::to_string(nk) + "）";
+            }
+            return dets;
+        }
     }
 
     auto at = [&](int f, int a) -> float {

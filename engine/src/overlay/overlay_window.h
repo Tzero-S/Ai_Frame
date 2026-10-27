@@ -32,6 +32,7 @@ private:
     void* hwnd_ = nullptr;
     void* mem_dc_ = nullptr;
     void* dib_ = nullptr;
+    void* old_bmp_ = nullptr; // SelectObject 的返回值：shutdown 时还原，避免删被引用的位图
     uint32_t* pixels_ = nullptr;
     int width_ = 0;
     int height_ = 0;

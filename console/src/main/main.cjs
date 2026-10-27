@@ -275,10 +275,33 @@ app.on('window-all-closed', () => {
   if (quitting && process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', async () => {
+// 退出清理：before-quit 的异步回调不会被框架等待（旧实现里 await 是空转，
+// 进程可能在 taskkill 之前就退了，留下孤儿引擎）。改成两段式：
+//   第一次 before-quit → 拦下退出，异步停引擎，完成后再 app.quit()；
+//   第二次 before-quit → 直接放行。
+let quittingCleanupDone = false;
+let quittingCleanupRunning = false;
+
+app.on('before-quit', (e) => {
   quitting = true;
-  // 只清理自己拉起的引擎，外部实例不动
-  if (host.status().managed) {
-    await host.stop();
+  if (quittingCleanupDone) return; // 第二次进来：放行
+  const managed = host.status().managed;
+  if (!managed) {
+    quittingCleanupDone = true;
+    return;
   }
+  if (quittingCleanupRunning) {
+    e.preventDefault(); // 清理进行中，继续等
+    return;
+  }
+  e.preventDefault();
+  quittingCleanupRunning = true;
+  void host
+    .stop()
+    .catch(() => {})
+    .finally(() => {
+      quittingCleanupRunning = false;
+      quittingCleanupDone = true;
+      app.quit();
+    });
 });

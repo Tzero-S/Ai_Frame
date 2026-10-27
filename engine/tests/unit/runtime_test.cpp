@@ -2,6 +2,10 @@
 #include "core/runtime.h"
 #include "core/json.h"
 #include "ipc/framing.h"
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <vector>
 
 using namespace aim;
 
@@ -114,6 +118,80 @@ AIM_TEST(framing_oversize_clears) {
     std::string out;
     AIM_EXPECT_FALSE(ipc::TryDecodeFrame(buf, out));
     AIM_EXPECT_TRUE(buf.empty());
+}
+
+// P0-1 回归：IPC 线程读快照与推理线程写状态并发时，必须无崩溃/无死锁。
+// 没有互斥保护时，SnapshotJson 遍历 detections_ 与 SetDetections 的 assign 竞争，
+// 会读到已释放的缓冲区（ASan 下报 heap-use-after-free）。
+AIM_TEST(runtime_concurrent_snapshot_and_writes) {
+    EngineRuntime rt;
+    rt.Start(0);
+
+    // 先写一帧再开线程：否则读线程的第一次快照必然是 frames=0，
+    // 会被下面的"撕裂读"判据误判（该判据只在已有帧时才有意义）。
+    {
+        PipelineResult seed;
+        seed.ok = true;
+        seed.seq = 1;
+        rt.OnFrame(1, seed, FrameTimings{});
+    }
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> reads{0};
+
+    std::thread writer([&] {
+        std::vector<Detection> dets;
+        for (int i = 0; i < 16; ++i) {
+            Detection d;
+            d.box = RectF{static_cast<float>(i), static_cast<float>(i), 10.f, 20.f};
+            d.score = 0.5f;
+            d.class_id = i % 3;
+            dets.push_back(d);
+        }
+        int64_t now = 1;
+        while (!stop.load(std::memory_order_relaxed)) {
+            PipelineResult r;
+            r.ok = true;
+            r.has_target = true;
+            r.seq = static_cast<uint32_t>(now);
+            FrameTimings t;
+            t.infer_ms = 1.0;
+            rt.OnFrame(now++, r, t);
+            // 交替提交不同长度，制造 vector 的扩容/释放
+            if (now % 2 == 0) {
+                rt.SetDetections(dets);
+            } else {
+                rt.SetDetections(std::vector<Detection>{});
+            }
+            rt.OnDrop(1);
+        }
+    });
+
+    std::atomic<int> bad_json{0};
+    std::thread reader([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            const std::string js = rt.SnapshotJson(42);
+            if (js.find("\"running\"") == std::string::npos ||
+                js.find("\"detections\"") == std::string::npos) {
+                bad_json.fetch_add(1);
+            }
+            const StatusSnapshot s = rt.Snapshot(42);
+            if (s.seq == 0 && s.frames == 0) bad_json.fetch_add(1); // 撕裂读的粗筛
+            reads.fetch_add(1);
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    stop.store(true);
+    writer.join();
+    reader.join();
+
+    AIM_EXPECT_TRUE(reads.load() > 0);
+    AIM_EXPECT_EQ(bad_json.load(), 0); // 每份快照都是自洽的 JSON
+    // 收尾：最后写入的状态仍可读，且计数一致
+    const StatusSnapshot fin = rt.Snapshot(1000);
+    AIM_EXPECT_TRUE(fin.frames > 0);
+    AIM_EXPECT_TRUE(fin.drop_count > 0);
 }
 
 int main() {

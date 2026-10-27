@@ -1,4 +1,5 @@
 #include "core/config.h"
+#include "core/config_schema.h"
 #include "core/json.h"
 #include <cmath>
 #include <cstring>
@@ -765,6 +766,59 @@ Result<void> ConfigManager::Validate(const Config& c) {
         c.anti_detect.switch_hysteresis_frames > 60)
         return bad(1033, "anti_detect.switch_hysteresis_frames 超出 [0,60]", "切换迟滞帧数");
 
+    // ---- 采集目标屏 ----
+    // 不校验的后果：配错序号只会在运行期退化成主屏并打一条 WARN，用户很难关联到"配错了"。
+    if (c.capture.output_monitor < 0 || c.capture.output_monitor > 15)
+        return bad(1039, "capture.output_monitor 超出 [0,15]",
+                   "与 DXGI 输出序号一致，0 = 第一块屏");
+
+    // ---- 执行通道细节 ----
+    if (!finite(c.actuator.sendinput.move_scale) || c.actuator.sendinput.move_scale <= 0.f ||
+        c.actuator.sendinput.move_scale > 100.f)
+        return bad(1040, "actuator.sendinput.move_scale 超出 (0,100]",
+                   "1 = 原始像素；0 会导致完全不动");
+    if (c.actuator.sendinput.min_step < 0 || c.actuator.sendinput.min_step > 1000)
+        return bad(1041, "actuator.sendinput.min_step 超出 [0,1000]", "最小步进像素");
+    if (c.actuator.ghub.hz < 1 || c.actuator.ghub.hz > 8000)
+        return bad(1042, "actuator.ghub.hz 超出 [1,8000]", "上报频率，常见 1000");
+    if (c.actuator.ghub.max_step < 1 || c.actuator.ghub.max_step > 127)
+        return bad(1043, "actuator.ghub.max_step 超出 [1,127]", "单报告步进上限");
+    if (!ConfigSchema::IsIpv4(c.actuator.kmbox.ip))
+        return bad(1044, "actuator.kmbox.ip 不是合法 IPv4", "形如 192.168.2.188");
+    if (!c.actuator.kmbox.uid.empty() && !ConfigSchema::IsHex8(c.actuator.kmbox.uid))
+        return bad(1045, "actuator.kmbox.uid 必须是 8 位十六进制", "例如 529C5C53");
+
+    // ---- 微调 ----
+    if (c.aim.micro_adjust.step_px < 0 || c.aim.micro_adjust.step_px > 200)
+        return bad(1046, "aim.micro_adjust.step_px 超出 [0,200]", "微调步进像素");
+
+    // ---- 容器规模上限（防止畸形配置把内存/CPU 拖垮）----
+    if (c.fov.ads_levels.size() > 32)
+        return bad(1047, "fov.ads_levels 超过 32 档", "实际倍镜不会超过 32 档");
+    if (c.inference.class_names.size() > 256 || c.inference.selected_class_names.size() > 256)
+        return bad(1048, "类别表超过 256 项", "检查模型元数据是否被误写进配置");
+    for (const auto& n : c.inference.class_names) {
+        if (n.size() > 128) return bad(1049, "类别名超过 128 字符", "类别名应短小");
+    }
+    for (const auto& n : c.inference.selected_class_names) {
+        if (n.size() > 128) return bad(1049, "类别名超过 128 字符", "类别名应短小");
+    }
+
+    // ---- 热键/按键名长度 ----
+    {
+        const std::string* keys[] = {&c.aim.hotkey_primary,   &c.aim.hotkey_secondary,
+                                     &c.weapon.recoil.hotkey,  &c.weapon.trigger.key,
+                                     &c.hotkeys.toggle_hud,    &c.hotkeys.toggle_team,
+                                     &c.hotkeys.toggle_aim,    &c.hotkeys.adhesion_minus,
+                                     &c.hotkeys.adhesion_plus, &c.hotkeys.push_switch,
+                                     &c.hotkeys.target_up,     &c.hotkeys.target_down,
+                                     &c.hotkeys.target_left,   &c.hotkeys.target_right};
+        for (const std::string* k : keys) {
+            if (k->size() > 64)
+                return bad(1050, "按键名超过 64 字符", "按键名形如 VK_LBUTTON / F1");
+        }
+    }
+
     return Result<void>::Ok();
 }
 
@@ -772,6 +826,16 @@ Result<Config> ConfigManager::LoadFromFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return Result<Config>::Fail(1005, "无法打开配置文件: " + path,
                                         "确认路径正确，缺失时将以默认值生成");
+    // 大小上限：配置文件正常只有几十 KB。不设限时一个被替换成几个 GB 的文件
+    // 会直接把进程内存吃光（而且解析器还要再分配一份等大的 JSON 树）。
+    constexpr std::streamoff kMaxConfigBytes = 4 * 1024 * 1024;
+    f.seekg(0, std::ios::end);
+    const std::streamoff size = f.tellg();
+    if (size > kMaxConfigBytes) {
+        return Result<Config>::Fail(1051, "配置文件过大: " + std::to_string(size) + " 字节",
+                                    "正常配置应小于 4 MB，检查是否被替换");
+    }
+    f.seekg(0, std::ios::beg);
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     return FromJson(text);
 }

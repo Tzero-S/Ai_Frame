@@ -3,19 +3,21 @@
 namespace aim::base64 {
 
 namespace {
-const char* kAlphabet =
+constexpr const char* kAlphabet =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-int8_t* RevTable() {
-    static int8_t rev[256];
-    static bool init = false;
-    if (!init) {
-        for (int i = 0; i < 256; ++i) rev[i] = -1;
-        for (int i = 0; i < 64; ++i) rev[static_cast<uint8_t>(kAlphabet[i])] = static_cast<int8_t>(i);
-        init = true;
+// 反查表编译期生成：旧实现是"函数内 static + bool 懒初始化"，
+// 多线程首次同时调用会竞争（虽然当前调用路径单线程，但没有理由留这个坑）。
+struct RevTable {
+    int8_t v[256]{};
+    constexpr RevTable() {
+        for (int i = 0; i < 256; ++i) v[i] = -1;
+        for (int i = 0; i < 64; ++i) {
+            v[static_cast<uint8_t>(kAlphabet[i])] = static_cast<int8_t>(i);
+        }
     }
-    return rev;
-}
+};
+constexpr RevTable kRev{};
 } // namespace
 
 std::string Encode(const uint8_t* data, size_t len) {
@@ -40,7 +42,7 @@ std::string Encode(const uint8_t* data, size_t len) {
 
 bool Decode(const std::string& text, std::vector<uint8_t>& out, std::string* err) {
     out.clear();
-    const int8_t* rev = RevTable();
+    const int8_t* rev = kRev.v;
 
     // 用无符号 32 位累加：有符号 int 在连续左移 6 位时会溢出（UB），
     // 无符号回绕是定义行为，且 (val >> bits) & 0xFF 取低字节始终正确。

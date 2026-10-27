@@ -1,6 +1,10 @@
 #include "core/config_store.h"
 
 #include <filesystem>
+#include <string>
+#include <vector>
+
+#include "core/logger.h"
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -9,6 +13,22 @@
 namespace aim {
 
 namespace {
+
+// 收集 patch 里在 defaults 中不存在的键路径（用于拼写错误的显式告警）。
+// 不做"拒绝"：未知键可能来自更新版本的控制台，直接拒绝会让前后端版本不一致时无法下发。
+void CollectUnknownKeys(const json::Value& patch, const json::Value& base,
+                        const std::string& prefix, std::vector<std::string>& out) {
+    if (!patch.isObject() || !base.isObject()) return;
+    for (const auto& kv : patch.obj) {
+        const json::Value* b = base.find(kv.first);
+        const std::string path = prefix.empty() ? kv.first : (prefix + "." + kv.first);
+        if (!b) {
+            out.push_back(path);
+            continue;
+        }
+        CollectUnknownKeys(kv.second, *b, path, out);
+    }
+}
 
 // 深合并：对象逐键递归；数组/标量整体替换（数组语义为"列表"，不应按下标合并）。
 void MergeInto(json::Value& base, const json::Value& patch) {
@@ -78,6 +98,23 @@ Result<int> ConfigStore::ApplyMergeJson(const std::string& patch_text) {
     if (!json::parse(ConfigManager::ToJson(cfg_, 0), base, err)) {
         return Result<int>::Fail(3003, "当前配置序列化失败: " + err, "内部错误，请重试");
     }
+
+    // 未知键告警（P3-4）：字段名拼错时旧实现完全静默 —— 用户以为改了，实际没生效。
+    // 这里把不认识的路径写进日志，既不阻断（兼容新版控制台）又能立刻定位拼写问题。
+    {
+        std::vector<std::string> unknown;
+        CollectUnknownKeys(patch, base, "", unknown);
+        if (!unknown.empty()) {
+            std::string joined;
+            for (size_t i = 0; i < unknown.size() && i < 8; ++i) {
+                if (i) joined += ", ";
+                joined += unknown[i];
+            }
+            if (unknown.size() > 8) joined += " …";
+            AIM_ENGINE(Warn, "config.apply: 忽略未知字段 " + joined);
+        }
+    }
+
     MergeInto(base, patch);
 
     // 合并结果同样走 migrate + validate（非法值不会落库）

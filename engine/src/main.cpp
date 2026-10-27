@@ -2,6 +2,7 @@
 #include <chrono>
 #include <conio.h>
 #include <cstdio>
+#include <functional>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -190,6 +191,32 @@ static int ProbeModel(const std::string& path) {
 //   --run                   生产运行循环（采集→推理→瞄准→执行 + 控制面）
 //   --preview               实时预览（不移动）
 //   --version / --help
+namespace {
+
+// 控制面的统一分派回调：解析失败统一回 400，成功则交给 registry。
+// run / serve 两处原本各抄一份，容易漂移（比如一处改了错误码另一处没改）。
+// post 可选：在响应生成后执行（serve 用它把 config.apply 落盘）。
+using PostHook = std::function<void(const aim::ipc::Request&, const aim::ipc::Response&)>;
+
+aim::ipc::PipeServer::Callback MakeDispatch(aim::ipc::HandlerRegistry& reg,
+                                            PostHook post = nullptr) {
+    return [&reg, post](const std::string& text) {
+        aim::ipc::Request req;
+        std::string e;
+        if (!aim::ipc::ParseRequest(text, req, &e)) {
+            aim::ipc::Response er;
+            er.code = 400;
+            er.msg = e;
+            return aim::ipc::Serialize(er);
+        }
+        const aim::ipc::Response resp = reg.Dispatch(req);
+        if (post) post(req, resp);
+        return aim::ipc::Serialize(resp);
+    };
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     // 控制台默认代码页为 936(GBK)，而本程序输出 UTF-8 中文字符串；
@@ -324,7 +351,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (!config_path.empty() && !run_mode) {
+    // 注意：这里是"只校验并退出"的分支，必须排除所有运行模式。
+    // 旧条件只有 !run_mode，导致 `--serve --config x.json` / `--preview --config x.json`
+    // 直接打印 "config ok" 后退出 —— 表现为"serve 忽略了配置文件"，实际是根本没进 serve 分支。
+    if (!config_path.empty() && !run_mode && !serve && !preview) {
         auto r = aim::ConfigManager::LoadFromFile(config_path);
         if (!r.ok()) {
             std::printf("config error [%d]: %s\nadvice: %s\n",
@@ -395,17 +425,7 @@ int main(int argc, char** argv) {
             // M9 L2：服务线程名中性化（须在 Start 之前设置）
             if (loop.settings().neutral_thread_names) server->SetThreadName("w1");
             std::string err;
-            if (!server->Start(pipe_name, [&reg](const std::string& text) {
-                    aim::ipc::Request req;
-                    std::string e;
-                    if (!aim::ipc::ParseRequest(text, req, &e)) {
-                        aim::ipc::Response er;
-                        er.code = 400;
-                        er.msg = e;
-                        return aim::ipc::Serialize(er);
-                    }
-                    return aim::ipc::Serialize(reg.Dispatch(req));
-                }, &err)) {
+            if (!server->Start(pipe_name, MakeDispatch(reg), &err)) {
                 std::printf("run: IPC 启动失败（继续无控制面运行）: %s\n", err.c_str());
                 server.reset();
             } else {
@@ -453,6 +473,21 @@ int main(int argc, char** argv) {
     }
 
     if (preview) {
+        // 预览也要认 --config（至少认采集目标屏）：否则 `--preview --config x.json`
+        // 会"看起来加载了配置、实际全用默认值"。
+        aim::Config pv_cfg = aim::ConfigManager::Defaults();
+        if (!config_path.empty()) {
+            auto loaded = aim::ConfigManager::LoadFromFile(config_path);
+            if (!loaded.ok()) {
+                std::printf("config error [%d]: %s\nadvice: %s\n", loaded.error().code,
+                            loaded.error().message.c_str(), loaded.error().advice.c_str());
+                return 2;
+            }
+            pv_cfg = loaded.value();
+            std::printf("preview: 已加载配置 %s（仅采用 capture.output_monitor）\n",
+                        config_path.c_str());
+        }
+
         std::string model = ResolveModelPath(preview_model);
         if (model.empty()) {
             std::printf("preview: 未指定模型；用 --model <path> 或环境变量 AIM_DEFAULT_MODEL 指定\n");
@@ -491,7 +526,7 @@ int main(int argc, char** argv) {
             return 6;
         }
         aim::spi::CaptureSpec cs;
-        cs.output_monitor = 0;
+        cs.output_monitor = pv_cfg.capture.output_monitor;
         cs.roi_w = roi;
         cs.roi_h = roi;
         if (!cap->init(cs)) {
@@ -518,7 +553,8 @@ int main(int argc, char** argv) {
         int sh = 1080;
         // 预览固定采 output_monitor=0（见上面的 cs.output_monitor），分辨率按同一块屏取；
         // 取不到再退回主屏，最后才用 1920x1080 并明确告警——不再静默用默认值。
-        if (!aim::GetMonitorResolution(0, sw, sh) && !aim::GetPrimaryResolution(sw, sh)) {
+        if (!aim::GetMonitorResolution(cs.output_monitor, sw, sh) &&
+            !aim::GetPrimaryResolution(sw, sh)) {
             std::printf("warning: 分辨率识别失败，退化 %dx%d（FOV/准星中心可能不准）\n", sw, sh);
         }
 
@@ -613,38 +649,55 @@ int main(int argc, char** argv) {
     }
 
     if (serve) {
+        // serve 只提供控制面，不跑数据面。因此：
+        //   ① 不 Start() 运行时 —— status.snapshot 如实返回 running=false，
+        //      而不是伪造一个 frames=0 的"运行中"；
+        //   ② 必须读取 --config —— 旧实现无条件用默认值，`--serve --config x.json` 被静默忽略；
+        //   ③ config.apply 之后要落盘 —— 否则控制台显示"应用成功"（版本号+1）但重启即丢。
         aim::EngineRuntime rt;
-        rt.Start(aim::Clock::NowMs());
-        rt.SetSegments(aim::SegmentState::Running,
-                       aim::SegmentState::Degraded,
+        rt.SetSegments(aim::SegmentState::Failed, aim::SegmentState::Failed,
                        aim::SegmentState::Failed);
-        aim::ConfigStore config_store;
+
+        aim::Config initial = aim::ConfigManager::Defaults();
+        if (!config_path.empty()) {
+            auto loaded = aim::ConfigManager::LoadFromFile(config_path);
+            if (!loaded.ok()) {
+                std::printf("config error [%d]: %s\nadvice: %s\n", loaded.error().code,
+                            loaded.error().message.c_str(), loaded.error().advice.c_str());
+                return 2;
+            }
+            initial = loaded.value();
+            std::printf("serve: 已加载配置 %s\n", config_path.c_str());
+        }
+        aim::ConfigStore config_store(initial);
 
         aim::ipc::HandlerRegistry reg;
         aim::ipc::RegisterBuiltinHandlers(reg, config_store, rt);
 
         aim::ipc::PipeServer server;
         std::string err;
-        if (!server.Start(pipe_name, [&reg](const std::string& text) {
-                aim::ipc::Request req;
-                std::string e;
-                if (!aim::ipc::ParseRequest(text, req, &e)) {
-                    aim::ipc::Response er;
-                    er.code = 400;
-                    er.msg = e;
-                    return aim::ipc::Serialize(er);
-                }
-                return aim::ipc::Serialize(reg.Dispatch(req));
-            }, &err)) {
+        const std::string persist_path = config_path;
+        // 配置变更后落盘（只在这个模式做：--run 模式由控制台/用户决定何时写文件）
+        auto persist_hook = [&config_store, persist_path](const aim::ipc::Request& req,
+                                                         const aim::ipc::Response& resp) {
+            if (resp.code != 0 || persist_path.empty()) return;
+            if (req.cmd != aim::ipc::cmd::kConfigApply) return;
+            const auto saved = config_store.SaveToFile(persist_path);
+            if (!saved.ok()) {
+                std::printf("serve: 配置已生效但落盘失败 [%d] %s\n", saved.error().code,
+                            saved.error().message.c_str());
+            }
+        };
+        if (!server.Start(pipe_name, MakeDispatch(reg, persist_hook), &err)) {
             std::printf("serve error: %s\n", err.c_str());
             return 4;
         }
 
-        std::printf("AIMEngine serving on \\\\.\\pipe\\%s (schema v%d). Press Enter to stop.\n",
+        std::printf("AIMEngine serving on \\\\.\\pipe\\%s (schema v%d, config-only). "
+                    "Press Enter to stop.\n",
                     pipe_name.c_str(), aim::ConfigManager::Defaults().schema_version);
         std::getchar();
         server.Stop();
-        rt.Stop();
         return 0;
     }
 

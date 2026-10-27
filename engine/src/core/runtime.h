@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <deque>
+#include <mutex>
 #include <string>
 #include "core/pipeline.h"
 
@@ -32,15 +33,25 @@ struct StatusSnapshot {
     uint32_t seq = 0;
 };
 
+// 线程模型（重要）：写路径（OnFrame/OnDrop/SetDetections/SetSegments）由推理线程调用，
+// 读路径（Snapshot/SnapshotJson）由 IPC 线程调用——两侧并发，内部一律加锁。
+// 早期版本没有互斥：管道线程遍历 detections_ 时推理线程 assign() 会释放旧缓冲，
+// 读侧持有悬垂指针（堆破坏）。改这里之前先想清楚调用方在哪个线程。
 class EngineRuntime {
 public:
     void Start(int64_t now_ms);
     void Stop();
-    bool Running() const { return running_; }
+    bool Running() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return running_;
+    }
 
     void SetSegments(SegmentState capture, SegmentState inference, SegmentState actuator);
     void OnFrame(int64_t now_ms, const PipelineResult& r, const FrameTimings& t);
-    void OnDrop(int n = 1) { drop_count_ += n; }
+    void OnDrop(int n = 1) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        drop_count_ += n;
+    }
 
     // 最近一帧检测（供 status.snapshot 推送给控制台/覆盖层，最多保留 16 个）
     void SetDetections(const std::vector<Detection>& dets);
@@ -52,6 +63,10 @@ public:
     bool DueForSnapshot(int64_t now_ms);
 
 private:
+    // 已持锁版本：供 Snapshot/SnapshotJson 复用，避免同一把非递归锁二次加锁
+    StatusSnapshot SnapshotLocked(int64_t now_ms) const;
+
+    mutable std::mutex mtx_;
     bool running_ = false;
     int64_t started_ms_ = 0;
     int64_t last_snapshot_ms_ = 0;
